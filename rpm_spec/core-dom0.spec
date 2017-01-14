@@ -328,6 +328,7 @@ fi
 %dir %{python_sitelib}/qubes/tests/int/tools
 %{python_sitelib}/qubes/tests/int/tools/__init__.py*
 %{python_sitelib}/qubes/tests/int/tools/qubes_create.py*
+%{python_sitelib}/qubes/tests/int/tools/qvm_features.py*
 %{python_sitelib}/qubes/tests/int/tools/qvm_firewall.py*
 %{python_sitelib}/qubes/tests/int/tools/qvm_check.py*
 %{python_sitelib}/qubes/tests/int/tools/qvm_prefs.py*

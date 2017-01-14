@@ -909,6 +909,7 @@ def load_tests(loader, tests, pattern): # pylint: disable=unused-argument
             'qubes.tests.int.tools.qubes_create',
             'qubes.tests.int.tools.qvm_check',
             'qubes.tests.int.tools.qvm_firewall',
+            'qubes.tests.int.tools.qvm_features',
             'qubes.tests.int.tools.qvm_prefs',
             'qubes.tests.int.tools.qvm_run',
 
