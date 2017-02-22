@@ -51,10 +51,10 @@ class TC_04_DispVM(qubes.tests.SystemTestsMixin,
         self.testvm.start()
 
         p = self.testvm.run("qvm-run --dispvm bash", passio_popen=True)
-        (stdout, _) = p.communicate(input="echo test; qubesdb-read /name; "
-                                          "echo ERROR\n")
+        (stdout, _) = p.communicate(input=b"echo test; qubesdb-read /name; "
+                                          b"echo ERROR\n")
         self.assertEquals(p.returncode, 0)
-        lines = stdout.splitlines()
+        lines = stdout.decode('ascii').splitlines()
         self.assertEqual(lines[0], "test")
         dispvm_name = lines[1]
         # wait for actual DispVM destruction
@@ -132,8 +132,8 @@ class TC_20_DispVMMixin(qubes.tests.SystemTestsMixin):
             self.assertTrue(dispvm.is_running())
             try:
                 window_title = 'user@%s' % (dispvm.name,)
-                p.stdin.write("xterm -e "
-                    "\"sh -c 'echo \\\"\033]0;{}\007\\\";read x;'\"\n".
+                p.stdin.write(b"xterm -e "
+                    b"\"sh -c 'echo \\\"\033]0;{}\007\\\";read x;'\"\n".
                     format(window_title).encode())
                 self.wait_for_window(window_title)
 
