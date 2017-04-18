@@ -23,7 +23,7 @@
 #
 #
 from __future__ import unicode_literals
-from qubes import QubesException, QubesVmCollection
+from qubes import QubesException, QubesVmCollection, qubes_base_dir
 from qubes import QubesVmClasses
 from qubes import system_path, vm_files
 from qubesutils import size_to_human, print_stdout, print_stderr, get_disk_usage
@@ -1576,6 +1576,8 @@ def backup_restore_set_defaults(options):
         options['verify-only'] = False
     if 'rename-conflicting' not in options:
         options['rename-conflicting'] = False
+    if 'paranoid-mode' not in options:
+        options['paranoid-mode'] = False
 
     return options
 
@@ -1860,6 +1862,9 @@ def backup_restore_prepare(backup_location, passphrase, options=None,
         error_callback=error_callback,
         format_version=format_version)
 
+    if not callable(print_callback):
+        print_callback = lambda x: None
+
     if header_data:
         if BackupHeader.version in header_data:
             format_version = header_data[BackupHeader.version]
@@ -1873,6 +1878,21 @@ def backup_restore_prepare(backup_location, passphrase, options=None,
             encrypted = header_data[BackupHeader.encrypted]
         if BackupHeader.compression_filter in header_data:
             compression_filter = header_data[BackupHeader.compression_filter]
+
+    if options['paranoid-mode']:
+        if format_version != 3:
+            raise QubesException(
+                'paranoid-mode: Rejecting old backup format')
+        if compressed:
+            raise QubesException(
+                'paranoid-mode: Compressed backups rejected')
+        if crypto_algorithm != DEFAULT_CRYPTO_ALGORITHM:
+            raise QubesException(
+                'paranoid-mode: Only {} encryption allowed'.format(
+                    DEFAULT_CRYPTO_ALGORITHM))
+        if options['dom0-home']:
+            print_callback('paranoid-mode: not restoring dom0 home')
+            options['dom0-home'] = False
 
     if BACKUP_DEBUG:
         print "Loading file", qubes_xml
@@ -1897,6 +1917,92 @@ def backup_restore_prepare(backup_location, passphrase, options=None,
         if is_vm_included_in_backup(backup_location, vm):
             if BACKUP_DEBUG:
                 print vm.name, "is included in backup"
+
+            # additional validation of VM object, in paranoid-mode
+            if options['paranoid-mode']:
+                if '..' in vm.name or '/' in vm.name or \
+                        not vm.verify_name(vm.name):
+                    print_callback(
+                        'paranoid-mode: rejecting VM name {!r}'.format(vm.name))
+                    continue
+                if vm.backup_path not in [
+                            'appvms/' + vm.name, 'vm-templates/' + vm.name,
+                            'servicevms/' + vm.name, 'vm' + str(vm.qid)]:
+                    print_callback('paranoid-mode: VM {}: rejecting backup '
+                       'path {!r}'.format(vm.name, vm.backup_path))
+                    continue
+
+                # only some of VM properties are going to be restored,
+                # those listed by vm.get_clone_attrs()
+
+                # all paths based on this will be ignored, but lets check it
+                # anyway since the value may be used in some extension
+                if vm.dir_path not in [os.path.join(qubes_base_dir, d,
+                        vm.name) for d in ('appvms', 'servicevms',
+                        'vm-templates')]:
+                    print_callback('paranoid-mode: VM {}: rejecting dir_path '
+                                   '{!r}'.format(vm.name, vm.dir_path))
+                    continue
+
+                # might be used on qrexec client/daemon command line
+                if vm.default_user != 'user':
+                    print_callback('paranoid-mode: VM {}: reverting default '
+                       'user {!r} to \'user\''.format(vm.name, vm.default_user))
+                    vm.default_user = 'user'
+
+                # properties included in libvirt XML and not validated
+                # elsewhere (like coerced to int or so)
+                if re.match(r'^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$', vm.mac,
+                        re.IGNORECASE) is None:
+                    print_callback(
+                        'paranoid-mode: VM {}: ignoring MAC {!r}'.
+                            format(vm.name, vm.mac))
+                    vm.mac = None
+
+                if hasattr(vm, 'kernelopts') and \
+                        any((c in vm.kernelopts) for c in '<>\'"&'):
+                    print_callback(
+                        'paranoid-mode: VM {}: ignoring kernelopts {!r}'.
+                            format(vm.name, vm.kernelopts))
+                    vm.kernelopts = ''
+                    vm.uses_default_kernelopts = True
+
+                # potential arbitrary file access
+                if hasattr(vm, 'drive') and vm.drive is not None:
+                    print_callback('paranoid-mode: VM {}: ignoring drive {!r}'.
+                        format(vm.name, vm.drive))
+                    vm.drive = None
+
+                if vm.pcidevs:
+                    print_callback('paranoid-mode: VM {}: ignoring PCI '
+                                   'devices: {!r}'.format(vm.name, vm.pcidevs))
+                    vm.pcidevs = []
+
+                # firewall.xml will be ignored anyway, don't warn about its
+                # value here
+                vm.firewall_conf = os.path.join(vm.dir_path, 'firewall.xml')
+
+                # The above list of validators was built based on careful
+                # review of all VM properties (parsing, usage etc), especially
+                # those restored during the restore process. List of restored
+                # properties can be get using vm.get_clone_attrs() (this is
+                # what vm.clone_attrs() does during VM restore). Lets compare
+                # the list, to catch also very unlikely case of any newly
+                # introduced property. This will catch only new properties,
+                # not changed behavior of existing one, but lets do at least
+                # something.
+                reviewd_attrs = [
+                 'kernel', 'uses_default_kernel', 'netvm', 'uses_default_netvm',
+                 'memory', 'maxmem', 'kernelopts', 'uses_default_kernelopts',
+                 'services', 'vcpus', '_mac', 'pcidevs', 'include_in_backups',
+                 '_label', 'default_user', 'qrexec_timeout',
+                 'timezone', 'qrexec_installed', 'guiagent_installed',
+                 'dispvm_netvm', 'uses_default_dispvm_netvm']
+                assert all((attr in reviewd_attrs)
+                    for attr in vm.get_clone_attrs())
+                # TODO: check/exclude firewall.xml
+                # TODO: pool_name
+                # TODO: appmenus
 
             vms_to_restore[vm.name] = {}
             vms_to_restore[vm.name]['vm'] = vm
@@ -2115,6 +2221,9 @@ def backup_restore_do(restore_info,
     appvm = options['appvm']
     format_version = options['format_version']
 
+    if not callable(print_callback):
+        print_callback = lambda x: None
+
     if format_version is None:
         format_version = backup_detect_format_version(backup_location)
 
@@ -2242,6 +2351,19 @@ def backup_restore_do(restore_info,
                                       vm.dir_path,
                                       os.path.dirname(new_vm.dir_path))
                 elif format_version >= 2:
+                    if options['paranoid-mode']:
+                        # cleanup/exclude things; do it this late to be sure
+                        # that no tricks on tar archive level would
+                        # (re-)create those files/directories
+                        for filedir in ['apps', 'apps.templates',
+                                'apps.tempicons', 'apps.icons', 'firewall.xml']:
+                            path = os.path.join(restore_tmpdir,
+                                vm.backup_path, filedir)
+                            if os.path.exists(path):
+                                print_callback('paranoid-mode: VM {}: skipping '
+                                               '{}'.format(vm.name, filedir))
+                                shutil.rmtree(path)
+
                     shutil.move(os.path.join(restore_tmpdir, vm.backup_path),
                                 new_vm.dir_path)
 
