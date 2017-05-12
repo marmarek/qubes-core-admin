@@ -195,6 +195,13 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
 
             *other arguments are as in :py:meth:`start`*
 
+        .. event:: domain-shutdown (subject, event)
+
+            Fired when domain has been shut down.
+
+            :param subject: Event emitter (the qube object)
+            :param event: Event name (``'domain-shutdown'``)
+
         .. event:: domain-pre-shutdown (subject, event, force)
 
             Fired at the beginning of :py:meth:`shutdown` method.
@@ -753,6 +760,10 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
         # pylint: disable=unused-argument
         self.init_log()
 
+        old_dir_path = os.path.join(os.path.dirname(self.dir_path), oldvalue)
+        new_dir_path = os.path.join(os.path.dirname(self.dir_path), newvalue)
+        os.rename(old_dir_path, new_dir_path)
+
         self.storage.rename(oldvalue, newvalue)
 
         if self._libvirt_domain is not None:
@@ -837,8 +848,7 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
         qmemman_client = yield from asyncio.get_event_loop().run_in_executor(
             None, self.request_memory, mem_required)
 
-        yield from asyncio.get_event_loop().run_in_executor(None,
-            self.storage.start)
+        yield from self.storage.start()
         self._update_libvirt_domain()
 
         try:
@@ -884,12 +894,17 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
             if self.is_running() or self.is_paused():
                 # This avoids losing the exception if an exception is raised in
                 # self.force_shutdown(), because the vm is not running or paused
-                yield from self.kill()
+                yield from self.kill()  # pylint: disable=not-an-iterable
             raise
 
         asyncio.ensure_future(self._wait_for_session())
 
         return self
+
+    @qubes.events.handler('domain-shutdown')
+    def on_domain_shutdown(self, _event, **_kwargs):
+        '''Cleanup after domain shutdown'''
+        asyncio.ensure_future(self.storage.stop())
 
     @asyncio.coroutine
     def shutdown(self, force=False, wait=False):
@@ -905,9 +920,6 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
         self.fire_event_pre('domain-pre-shutdown', force=force)
 
         self.libvirt_domain.shutdown()
-
-        yield from asyncio.get_event_loop().run_in_executor(None,
-            self.storage.stop)
 
         while wait and not self.is_halted():
             yield from asyncio.sleep(0.25)
@@ -926,8 +938,6 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
             raise qubes.exc.QubesVMNotStartedError(self)
 
         self.libvirt_domain.destroy()
-        yield from asyncio.get_event_loop().run_in_executor(None,
-            self.storage.stop)
 
         return self
 
@@ -1045,7 +1055,7 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
             raise qubes.exc.QubesVMError(
                 self, 'Domain {!r}: qrexec not connected'.format(self.name))
 
-        if not self.have_session.is_set():
+        if gui and not self.have_session.is_set():
             raise qubes.exc.QubesVMError(self, 'don\'t have session yet')
 
         self.fire_event_pre('domain-cmd-pre-run', start_guid=gui)
@@ -1070,6 +1080,10 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
             not filtered for problems originating between the keyboard and the
             chair.
         '''  # pylint: disable=redefined-builtin
+
+        kwargs.setdefault('stdin', subprocess.PIPE)
+        kwargs.setdefault('stdout', subprocess.PIPE)
+        kwargs.setdefault('stderr', subprocess.PIPE)
         p = yield from self.run_service(*args, **kwargs)
 
         # this one is actually a tuple, but there is no need to unpack it
@@ -1229,6 +1243,7 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
         self.have_session.set()
         self.fire_event('domain-has-session')
 
+    @asyncio.coroutine
     def create_on_disk(self, pool=None, pools=None):
         '''Create files needed for VM.
         '''
@@ -1242,7 +1257,16 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
                                                       pools)
             self.storage = qubes.storage.Storage(self)
 
-        self.storage.create()
+        try:
+            yield from self.storage.create()
+        except:
+            try:
+                yield from self.storage.remove()
+                os.rmdir(self.dir_path)
+            except:  # pylint: disable=bare-except
+                self.log.exception('failed to cleanup {} after failed VM '
+                                   'creation'.format(self.dir_path))
+            raise
 
         self.log.info('Creating icon symlink: {} -> {}'.format(
             self.icon_path, self.label.icon_path))
@@ -1254,6 +1278,7 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
         # fire hooks
         self.fire_event('domain-create-on-disk')
 
+    @asyncio.coroutine
     def remove_from_disk(self):
         '''Remove domain remnants from disk.'''
         if not self.is_halted():
@@ -1263,14 +1288,16 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
 
         self.fire_event('domain-remove-from-disk')
         try:
+            # TODO: make it async?
             shutil.rmtree(self.dir_path)
         except OSError as e:
             if e.errno == errno.ENOENT:
                 pass
             else:
                 raise
-        self.storage.remove()
+        yield from self.storage.remove()
 
+    @asyncio.coroutine
     def clone_disk_files(self, src, pool=None, pools=None, ):
         '''Clone files from other vm.
 
@@ -1285,13 +1312,19 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
             raise qubes.exc.QubesVMNotHaltedError(
                 self, 'Cannot clone a running domain {!r}'.format(self.name))
 
+        msg = "Destination {!s} already exists".format(self.dir_path)
+        assert not os.path.exists(self.dir_path), msg
+
+        self.log.info('Creating directory: {0}'.format(self.dir_path))
+        os.makedirs(self.dir_path, mode=0o775)
+
         if pool or pools:
             # pylint: disable=attribute-defined-outside-init
             self.volume_config = _patch_volume_config(self.volume_config, pool,
                                                       pools)
 
         self.storage = qubes.storage.Storage(self)
-        self.storage.clone(src)
+        yield from self.storage.clone(src)
         self.storage.verify()
         assert self.volumes != {}
 
