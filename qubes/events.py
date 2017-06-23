@@ -24,26 +24,27 @@
 Events are fired when something happens, like VM start or stop, property change
 etc.
 '''
-
+import asyncio
 import collections
 
 import itertools
 
 
-def handler(*events):
+def handler(*events, async=False):
     '''Event handler decorator factory.
 
     To hook an event, decorate a method in your plugin class with this
     decorator.
 
-    It probably makes no sense to specify more than one handler for specific
-    event in one class, because handlers are not run concurrently and there is
-    no guarantee of the order of execution.
+    Some event handlers may be defined as coroutine. In such a case, *async*
+    should be set to :py:obj:``True``.
+    See appropriate event documentation for details.
 
     .. note::
         For hooking events from extensions, see :py:func:`qubes.ext.handler`.
 
     :param str event: event type
+    :param bool async: is the handler a coroutine
     '''
 
     def decorator(func):
@@ -51,6 +52,7 @@ def handler(*events):
         func.ha_events = events
         # mark class own handler (i.e. not from extension)
         func.ha_bound = True
+        func.ha_async = async
         return func
 
     return decorator
@@ -142,9 +144,10 @@ class Emitter(object, metaclass=EmitterMeta):
         '''
 
         if not self.events_enabled:
-            return []
+            return [], []
 
         effects = []
+        async_effects = []
         for i in order:
             try:
                 handlers_dict = i.__handlers__
@@ -157,8 +160,24 @@ class Emitter(object, metaclass=EmitterMeta):
                     key=(lambda handler: hasattr(handler, 'ha_bound')),
                     reverse=True):
                 effect = func(self, event, **kwargs)
-                if effect is not None:
+                # "is True" to rule out unittest.mock.Mock...
+                if getattr(func, 'ha_async', False) is True:
+                    assert effect is not None
+                    async_effects.append(effect)
+                elif effect is not None:
                     effects.extend(effect)
+        return effects, async_effects
+
+    @asyncio.coroutine
+    def _handle_async_result(self, sync_effects, async_effects):
+        ''' Helper function to handle coroutines returned by event handlers '''
+        # pylint: disable=no-self-use
+        effects = sync_effects
+        async_tasks, _ = yield from asyncio.wait(async_effects)
+        for task in async_tasks:
+            effect = task.result()
+            if effect is not None:
+                effects.extend(effect)
         return effects
 
     def fire_event(self, event, pre_event=False, **kwargs):
@@ -170,8 +189,12 @@ class Emitter(object, metaclass=EmitterMeta):
         (specified in class definition), then handlers from extensions. Aside
         from above, remaining order is undefined.
 
+        This method call only synchronous handlers. If any asynchronous
+        handler is registered for the event, :py:class:``RuntimeError`` is
+        raised.
+
         .. seealso::
-            :py:meth:`fire_event_pre`
+            :py:meth:`fire_event_async`
 
         :param str event: event identifier
         :param pre_event: is this -pre- event? reverse handlers calling order
@@ -185,4 +208,43 @@ class Emitter(object, metaclass=EmitterMeta):
             order = itertools.chain((self,), self.__class__.__mro__)
         else:
             order = itertools.chain(reversed(self.__class__.__mro__), (self,))
-        return self._fire_event_in_order(order, event, kwargs)
+        sync_effects, async_effects = self._fire_event_in_order(order, event,
+            kwargs)
+        if async_effects:
+            raise RuntimeError(
+                'unexpected async-handler(s) {!r} for sync event {!s}'.format(
+                    async_effects, event))
+        return sync_effects
+
+
+    @asyncio.coroutine
+    def fire_event_async(self, event, pre_event=False, **kwargs):
+        '''Call all handlers for an event, allowing async calls.
+
+        Handlers are called for class and all parent classes, in **reversed**
+        or **true** (depending on *pre_event* parameter)
+        method resolution order. For each class first are called bound handlers
+        (specified in class definition), then handlers from extensions. Aside
+        from above, remaining order is undefined.
+
+        Thi method call both synchronous and asynchronous handlers. Order of
+        asynchronous calls is, by definition, undefined.
+
+        .. seealso::
+            :py:meth:`fire_event`
+
+        :param str event: event identifier
+        :param pre_event: is this -pre- event? reverse handlers calling order
+        :returns: list of effects
+
+        All *kwargs* are passed verbatim. They are different for different
+        events.
+        '''
+
+        if pre_event:
+            order = itertools.chain((self,), self.__class__.__mro__)
+        else:
+            order = itertools.chain(reversed(self.__class__.__mro__), (self,))
+        # pylint: disable=no-value-for-parameter
+        return (yield from self._handle_async_result(*self._fire_event_in_order(
+            order, event, kwargs)))
