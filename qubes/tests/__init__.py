@@ -339,6 +339,9 @@ class QubesTestCase(unittest.TestCase):
     '''Base class for Qubes unit tests.
     '''
 
+    #: should external (outside of core-admin) extensions be disabled
+    disable_external_extensions = True
+
     def __init__(self, *args, **kwargs):
         super(QubesTestCase, self).__init__(*args, **kwargs)
         self.longMessage = True
@@ -350,6 +353,7 @@ class QubesTestCase(unittest.TestCase):
             self.assertDevicesEqual)
 
         self.loop = None
+        self._orig_iter_entry_points = None
 
 
     def __str__(self):
@@ -358,15 +362,24 @@ class QubesTestCase(unittest.TestCase):
             self.__class__.__name__,
             self._testMethodName)
 
+    def _iter_entry_points_no_external_extensions(self, group, *args, **kwargs):
+        if group == 'qubes.ext':
+            for ep in self._orig_iter_entry_points(group, *args, **kwargs):
+                if ep.module_name.startswith('qubes.ext.'):
+                    yield ep
+        else:
+            yield from self._orig_iter_entry_points(group, *args, **kwargs)
 
     def setUp(self):
         super().setUp()
+        if self.disable_external_extensions:
+            self._orig_iter_entry_points = pkg_resources.iter_entry_points
+            pkg_resources.iter_entry_points = \
+                self._iter_entry_points_no_external_extensions
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
     def tearDown(self):
-        super(QubesTestCase, self).tearDown()
-
         # The loop, when closing, throws a warning if there is
         # some unfinished bussiness. Let's catch that.
         with warnings.catch_warnings():
@@ -386,6 +399,11 @@ class QubesTestCase(unittest.TestCase):
                 and any(tc is self for tc, exc in failed_test_cases):
             raise BeforeCleanExit()
 
+        if self.disable_external_extensions:
+            pkg_resources.iter_entry_points = self._orig_iter_entry_points
+            self._orig_iter_entry_points = None
+
+        super(QubesTestCase, self).tearDown()
 
     def assertNotRaises(self, excClass, callableObj=None, *args, **kwargs):
         """Fail if an exception of class excClass is raised
@@ -575,6 +593,10 @@ class SystemTestsMixin(object):
     stuff there. VMs created in :py:meth:`TestCase.setUpClass` should
     use self.make_vm_name('...', class_teardown=True) for name creation.
     """
+
+    # enable back external extensions for integration tests
+    disable_external_extensions = False
+
     # noinspection PyAttributeOutsideInit
     def setUp(self):
         if not in_dom0:
