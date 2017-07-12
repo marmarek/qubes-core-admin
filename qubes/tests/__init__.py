@@ -714,7 +714,7 @@ class SystemTestsMixin(object):
 
         try:
             vm.remove_from_disk()
-        except: # pylint: disable=bare-except
+        except:  # pylint: disable=bare-except
             pass
 
         del app.domains[vm.qid]
@@ -728,10 +728,11 @@ class SystemTestsMixin(object):
         try:
             conn = libvirt.open(qubes.config.defaults['libvirt_uri'])
             dom = conn.lookupByName(vmname)
-        except: # pylint: disable=bare-except
+        except:  # pylint: disable=bare-except
             pass
         else:
             cls._remove_vm_libvirt(dom)
+            conn.close()
 
         cls._remove_vm_disk(vmname)
 
@@ -775,7 +776,7 @@ class SystemTestsMixin(object):
             subprocess.check_call(['sudo', 'lvremove', '-f'] +
                 [vol.strip() for vol in volumes.splitlines()
                     if ('/' + prefix) in vol],
-                stdout=open(os.devnull, 'w'))
+                stdout=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             pass
 
@@ -849,7 +850,7 @@ class SystemTestsMixin(object):
 
         wait_count = 0
         while subprocess.call(['xdotool', 'search', '--name', title],
-                stdout=open(os.path.devnull, 'w'), stderr=subprocess.STDOUT) \
+                stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT) \
                     == int(show):
             wait_count += 1
             if wait_count > timeout*10:
@@ -895,7 +896,7 @@ class SystemTestsMixin(object):
         # create a single partition
         p = subprocess.Popen(['sfdisk', '-q', '-L', vm.storage.root_img],
             stdin=subprocess.PIPE,
-            stdout=open(os.devnull, 'w'),
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT)
         p.communicate('2048,\n')
         assert p.returncode == 0, 'sfdisk failed'
@@ -914,7 +915,7 @@ class SystemTestsMixin(object):
                 '--target', 'i386-pc',
                 '--modules', 'part_msdos ext2',
                 '--boot-directory', mountpoint, loopdev],
-                stderr=open(os.devnull, 'w')
+                stderr=subprocess.DEVNULL
             )
             grub_cfg = '{}/grub2/grub.cfg'.format(mountpoint)
             subprocess.check_call(
@@ -949,7 +950,7 @@ class SystemTestsMixin(object):
             subprocess.check_call(
                 ['dracut'] + dracut_args + [os.path.join(mountpoint,
                     'initrd')],
-                stderr=open(os.devnull, 'w')
+                stderr=subprocess.DEVNULL
             )
         finally:
             subprocess.check_call(['sudo', 'umount', mountpoint])
