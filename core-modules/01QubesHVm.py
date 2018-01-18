@@ -63,6 +63,7 @@ class QubesHVm(QubesResizableVm):
         attrs.pop('kernelopts')
         attrs.pop('uses_default_kernel')
         attrs.pop('uses_default_kernelopts')
+        attrs['virt_mode']['func'] = lambda value: 'hvm'
         attrs['dir_path']['func'] = lambda value: value if value is not None \
                 else os.path.join(system_path["qubes_appvms_dir"], self.name)
         attrs['config_file_template']['func'] = \
@@ -106,6 +107,16 @@ class QubesHVm(QubesResizableVm):
 
     def is_appvm(self):
         return True
+
+    @property
+    def virt_mode(self):
+        return self._virt_mode
+
+    @virt_mode.setter
+    def virt_mode(self, value):
+        if value not in ["default", "hvm"]:
+            raise QubesException("Invalid virt_mode - only hvm supported for this VM")
+        self._virt_mode = "hvm"
 
     @classmethod
     def is_template_compatible(cls, template):
