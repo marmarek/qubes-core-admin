@@ -20,8 +20,8 @@
 ''' Driver for storing vm images in a LVM thin pool '''
 
 import logging
-import operator
 import os
+import re
 import subprocess
 
 import time
@@ -44,8 +44,44 @@ def check_lvm_version():
 
 lvm_is_very_old = check_lvm_version()
 
+
 class ThinPool(qubes.storage.Pool):
     ''' LVM Thin based pool implementation
+
+    Volumes are stored as LVM thin volumes, in thin pool specified by
+    *volume_group*/*thin_pool* arguments. LVM volume naming scheme:
+
+        vm-{vm_name}-{volume_name}[-suffix]
+
+    Where suffix can be one of:
+        "-snap" - snapshot for currently running VM, at VM shutdown will be
+        either discarded (if save_on_stop=False), or committed
+        (if save_on_stop=True)
+        "-{revision_id}" - volume revision - new revision is automatically
+        created at each VM shutdown, the newest one is the volume current state;
+        *revisions_to_keep* control how many old revisions
+        (in addition to the current one) should be stored
+        "" (no suffix) - volatile volume (snap_on_start=False,
+        save_on_stop=False); also a deprecated name for the most recent
+        committed revision
+
+    On VM startup, new volume is created, depending on volume type,
+    according to the table below:
+
+    snap_on_start, save_on_stop
+    False,         False,        - no suffix, fresh empty volume
+    False,         True,         - "-snap", snapshot of last committed revision
+    True ,         False,        - "-snap", snapshot of last committed revision
+                                   of source volume (from VM's template)
+    True,          True,         - unsupported configuration
+
+    Volume's revision_id is either:
+     - "{revision_number}.{timestamp}", where revision number is monotonic
+       number and a timestamp is in '%s' format, or
+     - "{timestamp}", where timestamp is in '%s' format
+
+    The second format is old one, and all revisions in old format are considered
+    older than any revision in new format.
     '''  # pylint: disable=protected-access
 
     size_cache = None
@@ -126,6 +162,7 @@ class ThinPool(qubes.storage.Pool):
     def list_volumes(self):
         ''' Return a list of volumes managed by this pool '''
         volumes = []
+        revision_suffix_re = re.compile(r'.*-[0-9]+\.[0-9]+$')
         for vid, vol_info in size_cache.items():
             if not vid.startswith(self.volume_group + '/'):
                 continue
@@ -137,14 +174,13 @@ class ThinPool(qubes.storage.Pool):
             if vid.endswith('-back'):
                 # old revisions
                 continue
-            config = {
-                'pool': self,
-                'vid': vid,
-                'name': vid,
-                'volume_group': self.volume_group,
-                'rw': vol_info['attr'][1] == 'w',
-            }
-            volumes += [ThinVolume(**config)]
+            if revision_suffix_re.match(vid):
+                # some revision, split its number to get vid
+                vid = vid.rsplit('-', 1)[0]
+            volume = self.get_volume(vid)
+            if volume in volumes:
+                continue
+            volumes.append(volume)
         return volumes
 
     @property
@@ -198,6 +234,24 @@ def init_cache(log=logging.getLogger('qubes.storage.lvm')):
 
 size_cache = init_cache()
 
+
+def _revision_sort_key(revision):
+    '''Sort key for revisions. For old revisions (just timestamp),
+    sort them by time; for new ones (number.timestamp), sort by number.
+    All new revisions are considered newer by all old ones.
+
+    :returns tuple(number, timestamp)
+    '''
+    if isinstance(revision, tuple):
+        revision = revision[0]
+    if '-' in revision:
+        revision = revision.split('-')[0]
+    if '.' in revision:
+        number, timestamp = revision.split('.', 1)
+        return int(number), int(timestamp)
+    return 0, int(revision)
+
+
 class ThinVolume(qubes.storage.Volume):
     ''' Default LVM thin volume implementation
     '''  # pylint: disable=too-few-public-methods
@@ -211,25 +265,69 @@ class ThinVolume(qubes.storage.Volume):
         if self.snap_on_start or self.save_on_stop:
             self._vid_snap = self.vid + '-snap'
 
+        self.__vid_current = None
+
         self._size = size
+
+    def _get_next_revision_number(self):
+        revisions = self._get_revisions('(|-back)')
+        if not revisions:
+            return 1
+        max_revision = max([
+            int(r.split('.')[0]) if '.' in r else 0
+            for r in revisions
+        ])
+        return max_revision + 1
+
+    @property
+    def _vid_current(self):
+        if self.__vid_current is None:
+            self._refresh_vid_current()
+        return self.__vid_current
+
+    def _refresh_vid_current(self):
+        revisions = self._get_revisions('')
+        if not revisions:
+            # fallback to old format - possibly pool
+            # not connected, don't crash caller
+            # of 'path' attribute access
+            self.__vid_current = self.vid
+        else:
+            last_revision = \
+                max(revisions.items(), key=_revision_sort_key)[0]
+            self.__vid_current = self.vid + '-' + last_revision
 
     @property
     def path(self):
-        return '/dev/' + self.vid
+        return '/dev/' + self._vid_current
 
-    @property
-    def revisions(self):
+    def _get_revisions(self, suffix):
+        name_re = re.compile(r'{}-[0-9.]*{}'.format(self.vid, suffix))
         name_prefix = self.vid + '-'
         revisions = {}
         for revision_vid in size_cache:
-            if not revision_vid.startswith(name_prefix):
-                continue
-            if not revision_vid.endswith('-back'):
+            if not name_re.fullmatch(revision_vid):
                 continue
             revision_vid = revision_vid[len(name_prefix):]
-            seconds = int(revision_vid[:-len('-back')])
+            # get revision without suffix
+            if '.' in revision_vid:
+                seconds = int(revision_vid.split('-')[0].split('.')[1])
+            else:
+                seconds = int(revision_vid.split('-')[0])
             iso_date = qubes.storage.isodate(seconds).split('.', 1)[0]
             revisions[revision_vid] = iso_date
+        return revisions
+
+    @property
+    def revisions(self):
+        revisions = self._get_revisions('(-back|)')
+        # return early if no revisions found - probably pool detached
+        if not revisions:
+            return revisions
+        # skip the current one
+        assert self._vid_current is not None
+        if self._vid_current != self.vid:
+            del revisions[self._vid_current[len(self.vid)+1:]]
         return revisions
 
     @property
@@ -237,7 +335,7 @@ class ThinVolume(qubes.storage.Volume):
         try:
             if self.is_dirty():
                 return qubes.storage.lvm.size_cache[self._vid_snap]['size']
-            return qubes.storage.lvm.size_cache[self.vid]['size']
+            return qubes.storage.lvm.size_cache[self._vid_current]['size']
         except KeyError:
             return self._size
 
@@ -271,19 +369,31 @@ class ThinVolume(qubes.storage.Volume):
         '''
         if revisions is None:
             revisions = sorted(self.revisions.items(),
-                key=operator.itemgetter(1))
+                key=_revision_sort_key)
             # pylint: disable=invalid-unary-operand-type
             revisions = revisions[:(-self.revisions_to_keep) or None]
             revisions = [rev_id for rev_id, _ in revisions]
 
         for rev_id in revisions:
+            # safety check
+            assert rev_id != self._vid_current
             try:
                 cmd = ['remove', self.vid + '-' + rev_id]
                 qubes_lvm(cmd, self.log)
             except qubes.storage.StoragePoolException:
                 pass
 
-    def _commit(self):
+    def _commit(self, vid_to_commit=None, keep=False):
+        '''
+        Commit temporary volume into current one. By default
+        :py:attr:`_vid_snap` is used (which is created by :py:meth:`start()`),
+        but can be overriden by *vid_to_commit* argument.
+
+        :param vid_to_commit: LVM volume ID to commit into this one
+        :param keep: whether to keep or not *vid_to_commit*.
+          IOW use 'clone' or 'rename' methods.
+        :return: None
+        '''
         msg = "Trying to commit {!s}, but it has save_on_stop == False"
         msg = msg.format(self)
         assert self.save_on_stop, msg
@@ -291,48 +401,62 @@ class ThinVolume(qubes.storage.Volume):
         msg = "Trying to commit {!s}, but it has rw == False"
         msg = msg.format(self)
         assert self.rw, msg
-        assert hasattr(self, '_vid_snap')
-
-        if self.revisions_to_keep > 0:
-            cmd = ['clone', self.vid,
-                '{}-{}-back'.format(self.vid, int(time.time()))]
-            qubes_lvm(cmd, self.log)
-            reset_cache()
-        self._remove_revisions()
+        if vid_to_commit is None:
+            assert hasattr(self, '_vid_snap')
+            vid_to_commit = self._vid_snap
 
         # TODO: when converting this function to coroutine, this _must_ be
         # under a lock
-        # remove old volume only after _successful_ clone of the new one
-        cmd = ['rename', self.vid, self.vid + '-tmp']
-        qubes_lvm(cmd, self.log)
-        try:
-            cmd = ['clone', self._vid_snap, self.vid]
-            qubes_lvm(cmd, self.log)
-        except:
-            # restore original volume
-            cmd = ['rename', self.vid + '-tmp', self.vid]
-            qubes_lvm(cmd, self.log)
-            raise
-        else:
-            cmd = ['remove', self.vid + '-tmp']
-            qubes_lvm(cmd, self.log)
+        if not os.path.exists('/dev/' + vid_to_commit):
+            # nothing to commit
+            return
 
+        previous_vid_current = self._vid_current
+        if previous_vid_current == self.vid:
+            # VM started with old code, need to rename volume
+            # to contain revision_id
+            cmd = ['rename', previous_vid_current,
+                   '{}-{}.{}'.format(
+                    self.vid, self._get_next_revision_number(),
+                    int(time.time()))]
+            qubes_lvm(cmd, self.log)
+            reset_cache()
+
+        # then assign new revision number to the volume we're committing right
+        # now
+        cmd = ['clone' if keep else 'rename',
+               vid_to_commit,
+               '{}-{}.{}'.format(
+                self.vid, self._get_next_revision_number(),
+                int(time.time()))]
+        qubes_lvm(cmd, self.log)
+        reset_cache()
+        self._refresh_vid_current()
+        # make sure the one we've committed right now is properly
+        # detected as the current one - before removing anything
+        assert self._vid_current == cmd[2]
+
+        # and remove old snapshots, if needed
+        self._remove_revisions()
 
     def create(self):
         assert self.vid
         assert self.size
         if self.save_on_stop:
+            revision_suffix = '-1.{}'.format(int(time.time()))
             if self.source:
-                cmd = ['clone', str(self.source), self.vid]
+                cmd = ['clone', self.source.path,
+                       self.vid + revision_suffix]
             else:
                 cmd = [
                     'create',
                     self.pool._pool_id,  # pylint: disable=protected-access
-                    self.vid.split('/', 1)[1],
+                    self.vid.split('/', 1)[1] + revision_suffix,
                     str(self.size)
                 ]
             qubes_lvm(cmd, self.log)
             reset_cache()
+            self._refresh_vid_current()
         return self
 
     def remove(self):
@@ -347,7 +471,7 @@ class ThinVolume(qubes.storage.Volume):
         self._remove_revisions(self.revisions.keys())
         if not os.path.exists(self.path):
             return
-        cmd = ['remove', self.vid]
+        cmd = ['remove', self.path]
         qubes_lvm(cmd, self.log)
         reset_cache()
         # pylint: disable=protected-access
@@ -356,8 +480,8 @@ class ThinVolume(qubes.storage.Volume):
     def export(self):
         ''' Returns an object that can be `open()`. '''
         # make sure the device node is available
-        qubes_lvm(['activate', self.vid], self.log)
-        devpath = '/dev/' + self.vid
+        qubes_lvm(['activate', self.path], self.log)
+        devpath = self.path
         return devpath
 
     @asyncio.coroutine
@@ -365,28 +489,32 @@ class ThinVolume(qubes.storage.Volume):
         if not src_volume.save_on_stop:
             return self
 
+        if self.is_dirty():
+            raise qubes.storage.StoragePoolException(
+                'Cannot import to dirty volume {} -'
+                ' start and stop a qube to cleanup'.format(self.vid))
         # HACK: neat trick to speed up testing if you have same physical thin
         # pool assigned to two qubes-pools i.e: qubes_dom0 and test-lvm
         # pylint: disable=line-too-long
         if isinstance(src_volume.pool, ThinPool) and \
                 src_volume.pool.thin_pool == self.pool.thin_pool:  # NOQA
-            cmd = ['remove', self.vid]
-            qubes_lvm(cmd, self.log)
-            cmd = ['clone', str(src_volume), str(self)]
-            qubes_lvm(cmd, self.log)
+            self._commit(src_volume.path, keep=True)
         else:
-            if src_volume.size != self.size:
-                self.resize(src_volume.size)
+            cmd = ['create', self.pool._pool_id, self._vid_snap.split('/')[1],
+                   str(src_volume.size)]
+            qubes_lvm(cmd)
             src_path = src_volume.export()
-            cmd = ['dd', 'if=' + src_path, 'of=/dev/' + self.vid,
+            cmd = ['dd', 'if=' + src_path, 'of=/dev/' + self._vid_snap,
                 'conv=sparse']
             p = yield from asyncio.create_subprocess_exec(*cmd)
             yield from p.wait()
             if p.returncode != 0:
+                cmd = ['remove', self._vid_snap]
+                qubes_lvm(cmd)
                 raise qubes.storage.StoragePoolException(
                     'Failed to import volume {!r}, dd exit code: {}'.format(
                         src_volume, p.returncode))
-            reset_cache()
+            self._commit()
 
         return self
 
@@ -406,23 +534,30 @@ class ThinVolume(qubes.storage.Volume):
         if self._vid_snap not in size_cache:
             return False
         return (size_cache[self._vid_snap]['origin'] !=
-               self.source.vid.split('/')[1])
-
+               self.source.path.split('/')[-1])
 
     def revert(self, revision=None):
+        if self.is_dirty():
+            raise qubes.storage.StoragePoolException(
+                'Cannot revert dirty volume {}, stop the qube first'.format(
+                    self.vid))
         if revision is None:
             revision = \
-                max(self.revisions.items(), key=operator.itemgetter(1))[0]
-        old_path = self.path + '-' + revision
+                max(self.revisions.items(), key=_revision_sort_key)[0]
+        old_path = '/dev/' + self.vid + '-' + revision
         if not os.path.exists(old_path):
             msg = "Volume {!s} has no {!s}".format(self, old_path)
             raise qubes.storage.StoragePoolException(msg)
 
-        cmd = ['remove', self.vid]
+        back_vid = self._vid_current
+        new_current_revision = '{}-{}.{}'.format(
+            self.vid, self._get_next_revision_number(), int(time.time()))
+        cmd = ['clone', self.vid + '-' + revision, new_current_revision]
         qubes_lvm(cmd, self.log)
-        cmd = ['clone', self.vid + '-' + revision, self.vid]
+        cmd = ['remove', back_vid]
         qubes_lvm(cmd, self.log)
         reset_cache()
+        self._refresh_vid_current()
         return self
 
     def resize(self, size):
@@ -448,7 +583,7 @@ class ThinVolume(qubes.storage.Volume):
             cmd = ['extend', self._vid_snap, str(size)]
             qubes_lvm(cmd, self.log)
         elif self.save_on_stop or not self.snap_on_start:
-            cmd = ['extend', self.vid, str(size)]
+            cmd = ['extend', self._vid_current, str(size)]
             qubes_lvm(cmd, self.log)
         reset_cache()
 
@@ -460,9 +595,9 @@ class ThinVolume(qubes.storage.Volume):
             pass
 
         if self.source is None:
-            cmd = ['clone', self.vid, self._vid_snap]
+            cmd = ['clone', self._vid_current, self._vid_snap]
         else:
-            cmd = ['clone', str(self.source), self._vid_snap]
+            cmd = ['clone', self.source.path, self._vid_snap]
         qubes_lvm(cmd, self.log)
 
 
@@ -481,10 +616,10 @@ class ThinVolume(qubes.storage.Volume):
         try:
             if self.save_on_stop:
                 self._commit()
-            if self.snap_on_start or self.save_on_stop:
+            if self.snap_on_start and not self.save_on_stop:
                 cmd = ['remove', self._vid_snap]
                 qubes_lvm(cmd, self.log)
-            else:
+            elif not self.snap_on_start and not self.save_on_stop:
                 cmd = ['remove', self.vid]
                 qubes_lvm(cmd, self.log)
         finally:
@@ -497,9 +632,9 @@ class ThinVolume(qubes.storage.Volume):
             # volatile volumes don't need any files
             return True
         if self.source is not None:
-            vid = str(self.source)
+            vid = self.source.path[len('/dev/'):]
         else:
-            vid = self.vid
+            vid = self._vid_current
         try:
             vol_info = size_cache[vid]
             if vol_info['attr'][4] != 'a':
@@ -526,7 +661,7 @@ class ThinVolume(qubes.storage.Volume):
     def usage(self):  # lvm thin usage always returns at least the same usage as
                       # the parent
         try:
-            return qubes.storage.lvm.size_cache[self.vid]['usage']
+            return qubes.storage.lvm.size_cache[self._vid_current]['usage']
         except KeyError:
             return 0
 

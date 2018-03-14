@@ -137,8 +137,10 @@ class TC_00_ThinPool(ThinPoolBase):
         self.assertEqual(volume.pool, self.pool.name)
         self.assertEqual(volume.size, qubes.config.defaults['root_img_size'])
         volume.create()
-        path = "/dev/%s" % volume.vid
-        self.assertTrue(os.path.exists(path))
+        path = volume.path
+        self.assertTrue(path.startswith('/dev/' + volume.vid),
+                        '{} does not start with /dev/{}'.format(path, volume.vid))
+        self.assertTrue(os.path.exists(path), path)
         volume.remove()
 
     def test_003_read_write_volume(self):
@@ -157,8 +159,10 @@ class TC_00_ThinPool(ThinPoolBase):
         self.assertEqual(volume.pool, self.pool.name)
         self.assertEqual(volume.size, qubes.config.defaults['root_img_size'])
         volume.create()
-        path = "/dev/%s" % volume.vid
-        self.assertTrue(os.path.exists(path))
+        path = volume.path
+        self.assertTrue(path.startswith('/dev/' + volume.vid),
+                        '{} does not start with /dev/{}'.format(path, volume.vid))
+        self.assertTrue(os.path.exists(path), path)
         volume.remove()
 
     def test_004_size(self):
@@ -203,7 +207,7 @@ class TC_00_ThinPool(ThinPoolBase):
         volume = self.app.get_pool(self.pool.name).init_volume(vm, config)
         volume.create()
         self.addCleanup(volume.remove)
-        path = "/dev/%s" % volume.vid
+        path = volume.path
         new_size = 64 * 1024 ** 2
         volume.resize(new_size)
         self.assertEqual(self._get_size(path), new_size)
@@ -223,7 +227,7 @@ class TC_00_ThinPool(ThinPoolBase):
         volume.create()
         self.addCleanup(volume.remove)
         volume.start()
-        path = "/dev/%s" % volume.vid
+        path = volume.path
         path2 = "/dev/%s" % volume._vid_snap
         new_size = 64 * 1024 ** 2
         volume.resize(new_size)
@@ -231,6 +235,7 @@ class TC_00_ThinPool(ThinPoolBase):
         self.assertEqual(self._get_size(path2), new_size)
         self.assertEqual(volume.size, new_size)
         volume.stop()
+        path = volume.path
         self.assertEqual(self._get_size(path), new_size)
         self.assertEqual(volume.size, new_size)
 
