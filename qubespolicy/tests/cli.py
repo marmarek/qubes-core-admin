@@ -76,6 +76,7 @@ class TC_00_qrexec_policy(qubes.tests.QubesTestCase):
             ('().evaluate', (self.system_info, 'source',
                 'target'), {}),
             ('().evaluate().target.__str__', (), {}),
+            ('().evaluate().target.__str__', (), {}),
             ('().evaluate().execute', ('process_ident,source,source-id', ), {}),
         ])
         self.assertEqual(self.dbus_mock.mock_calls, [])
@@ -208,6 +209,7 @@ class TC_00_qrexec_policy(qubes.tests.QubesTestCase):
             ('().evaluate', (self.system_info, 'source',
                 'target'), {}),
             ('().evaluate().target.__str__', (), {}),
+            ('().evaluate().target.__str__', (), {}),
             ('().evaluate().execute', ('process_ident,source,source-id',), {}),
         ])
         self.assertEqual(self.dbus_mock.mock_calls, [])
@@ -295,6 +297,7 @@ class TC_00_qrexec_policy(qubes.tests.QubesTestCase):
             ('', ('service',), {}),
             ('().evaluate', (self.system_info, 'source',
                 'target'), {}),
+            ('().evaluate().target.__str__', (), {}),
             ('().evaluate().target.__str__', (), {}),
             ('().evaluate().execute', ('process_ident,source,source-id',), {}),
         ])
