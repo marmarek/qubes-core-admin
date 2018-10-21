@@ -85,7 +85,10 @@ class StorageTestMixin(object):
         # volatile image not volatile
         yield from (
             self.vm1.run_for_stdio('echo test123 > /dev/xvde', user='root'))
-        yield from (self.vm1.shutdown(wait=True))
+        try:
+            yield from (self.vm1.shutdown(wait=True))
+        except qubes.exc.QubesVMShutdownTimeoutError:
+            yield from self.vm1.kill()
         yield from (self.vm1.start())
         yield from (self.vm1.run_for_stdio(
             'head -c {} /dev/zero 2>&1 | diff -q /dev/xvde - 2>&1'.format(size),
