@@ -180,6 +180,29 @@ class TC_00_VMs(AdminAPITestCase):
             b'provides_network')
         self.assertEqual(value, 'type=bool False')
 
+    def test_027_vm_property_get_list(self):
+        self.vm.provides_network = True
+        value = self.call_mgmt_func(
+            b'admin.vm.property.Get',
+            b'test-vm1',
+            b'dns')
+        self.assertEqual(value, 'default=True type=list 10.139.1.1\n10.139.1.2\n')
+
+    def test_028_vm_property_get_list_none(self):
+        value = self.call_mgmt_func(
+            b'admin.vm.property.Get',
+            b'test-vm1',
+            b'dns')
+        self.assertEqual(value, 'default=True type=list ')
+
+    def test_029_vm_property_get_list_default(self):
+        self.vm.provides_network = True
+        value = self.call_mgmt_func(
+            b'admin.vm.property.GetDefault',
+            b'test-vm1',
+            b'dns')
+        self.assertEqual(value, 'type=list 10.139.1.1\n10.139.1.2\n')
+
     def test_030_vm_property_set_vm(self):
         netvm = self.app.add_new_vm('AppVM', label='red', name='test-net',
             template='test-template', provides_network=True)
@@ -304,6 +327,28 @@ class TC_00_VMs(AdminAPITestCase):
             with self.assertRaises(qubes.exc.QubesValueError):
                 self.call_mgmt_func(b'admin.vm.property.Set', b'test-vm1',
                     b'maxmem', b'non-existing-color')
+            self.assertFalse(mock.called)
+        self.assertFalse(self.app.save.called)
+
+    def test_045_vm_propert_set_list(self):
+        with unittest.mock.patch('qubes.property.__set__') as mock:
+            self.call_mgmt_func(b'admin.vm.property.Set', b'test-vm1',
+                b'dns', b'1.1.1.1\n1.1.1.2\n')
+            mock.assert_called_once_with(self.vm, ['1.1.1.1', '1.1.1.2'])
+        self.assertTrue(self.app.save.called)
+
+    def test_046_vm_propert_set_list_empty(self):
+        with unittest.mock.patch('qubes.property.__set__') as mock:
+            self.call_mgmt_func(b'admin.vm.property.Set', b'test-vm1',
+                b'dns', b'')
+            mock.assert_called_once_with(self.vm, [])
+        self.assertTrue(self.app.save.called)
+
+    def test_047_vm_propert_set_list_invalid(self):
+        with unittest.mock.patch('qubes.property.__set__') as mock:
+            with self.assertRaises(qubes.exc.QubesValueError):
+                self.call_mgmt_func(b'admin.vm.property.Set', b'test-vm1',
+                    b'dns', b'1.1.1.1')
             self.assertFalse(mock.called)
         self.assertFalse(self.app.save.called)
 
