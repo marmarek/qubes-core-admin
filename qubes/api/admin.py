@@ -176,6 +176,8 @@ class QubesAdminAPI(qubes.api.AbstractQubesAPI):
             property_type = 'int'
         elif property_def.type is bool:
             property_type = 'bool'
+        elif property_def.type is list:
+            property_type = 'list'
         elif self.arg == 'label':
             property_type = 'label'
         else:
@@ -186,6 +188,8 @@ class QubesAdminAPI(qubes.api.AbstractQubesAPI):
         except AttributeError:
             return 'default=True type={} '.format(property_type)
         else:
+            if property_type == 'list' and value:
+                value = ''.join('{!s}\n'.format(v) for v in value)
             return 'default={} type={} {}'.format(
                 str(dest.property_is_default(self.arg)),
                 property_type,
@@ -220,6 +224,8 @@ class QubesAdminAPI(qubes.api.AbstractQubesAPI):
             property_type = 'int'
         elif property_def.type is bool:
             property_type = 'bool'
+        elif property_def.type is list:
+            property_type = 'list'
         elif self.arg == 'label':
             property_type = 'label'
         else:
@@ -230,6 +236,8 @@ class QubesAdminAPI(qubes.api.AbstractQubesAPI):
         except AttributeError:
             return None
         else:
+            if property_type == 'list' and value:
+                value = ''.join('{!s}\n'.format(v) for v in value)
             return 'type={} {}'.format(
                 property_type,
                 str(value) if value is not None else '')

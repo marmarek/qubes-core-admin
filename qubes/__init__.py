@@ -342,7 +342,7 @@ class property:  # pylint: disable=redefined-builtin,invalid-name
         :raises: qubes.exc.QubesValueError
         '''
         # do not treat type='str' as sufficient validation
-        if self.type is not None and self.type is not str:
+        if self.type not in (None, str, list):
             # assume specific type will preform enough validation
             try:
                 untrusted_newvalue = untrusted_newvalue.decode('ascii',
@@ -366,6 +366,13 @@ class property:  # pylint: disable=redefined-builtin,invalid-name
             if not all(x in allowed_set for x in untrusted_newvalue):
                 raise qubes.exc.QubesValueError(
                     'Invalid characters in property value')
+            if self.type is list:
+                untrusted_newvalue = untrusted_newvalue.split('\n')
+                # each list entry, including the last one,
+                # should be terminated with \n
+                if untrusted_newvalue[-1] != '':
+                    raise qubes.exc.QubesValueError
+                untrusted_newvalue = untrusted_newvalue[:-1]
             return untrusted_newvalue
 
 
