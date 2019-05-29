@@ -224,9 +224,9 @@ class NetVMMixin(qubes.events.Emitter):
     # used in both
     #
 
-    @property
+    @qubes.stateless_property
     def dns(self):
-        '''Secondary DNS server set up for this domain.'''
+        '''DNS servers set up for this domain.'''
         if self.netvm is not None or self.provides_network:
             return (
                 '10.139.1.1',
@@ -234,6 +234,8 @@ class NetVMMixin(qubes.events.Emitter):
             )
 
         return None
+
+    dns.type = list
 
     def __init__(self, *args, **kwargs):
         self._firewall = None
