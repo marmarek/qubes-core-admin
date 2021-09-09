@@ -1195,6 +1195,7 @@ class QubesVM(qubes.vm.mix.net.NetVMMixin, qubes.vm.BaseVM):
                 self.fire_event('property-reset:stubdom_xid',
                                 name='stubdom_xid')
                 self.fire_event('property-reset:start_time', name='start_time')
+                await self.storage.start_finalize()
             except libvirt.libvirtError as exc:
                 # missing IOMMU?
                 if self.virt_mode == 'hvm' and \

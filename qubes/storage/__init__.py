@@ -383,8 +383,22 @@ class Volume:
         This include making a snapshot of template's volume if
         :py:attr:`snap_on_start` is set.
 
+        It is guaranteed that after every start(), either start_finalize()
+        (for successful VM start), or stop() (for failed VM start)
+        will be called.
+
         This can be implemented as a coroutine."""
         raise self._not_implemented("start")
+
+    async def start_finalize(self):
+        """ Optional cleanup after start(), when volume is successfully
+        connected to a VM
+
+        This is the place for any cleanups after VM (specifically: block
+        backend driver) picks up the device. At this point, the driver keeps the
+        volume device open. If start() took some references (like, open FD)
+        to keep the volume alive, it can be released in this function.
+        """
 
     async def stop(self):
         """ Do what ever is needed on stop.
@@ -751,6 +765,11 @@ class Storage:
             (vol.start_encrypted(vol.encrypted_volume_path(self.vm.name, name))
              if vol.ephemeral else vol.start())
             for name, vol in self.vm.volumes.items())
+
+    async def start_finalize(self):
+        """ Execute the start_finalize method on each volume """
+        await qubes.utils.void_coros_maybe(
+            vol.start_finalize() for vol in self.vm.volumes.values())
 
     async def stop(self):
         """ Execute the stop method on each volume """
