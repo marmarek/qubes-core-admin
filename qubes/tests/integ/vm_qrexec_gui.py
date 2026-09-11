@@ -85,7 +85,9 @@ class TC_20_NonAudio(TC_00_AppVMMixin):
         self.loop.run_until_complete(self.wait_for_session(self.testvm1))
         title = "user@{}".format(self.testvm1.name)
         p = self.loop.run_until_complete(
-            self.testvm1.run(f"xterm -title {title}")
+            self.testvm1.run(
+                f"xterm -xrm 'xterm*allowTitleOps: false' -title {title}"
+            )
         )
         try:
             self.wait_for_window(title)
